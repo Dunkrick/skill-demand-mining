@@ -12,7 +12,11 @@ Run (local):
 Stages: load -> clean/normalize skills -> Parquet -> EDA -> FP-Growth rules
         -> KMeans role clusters -> role classifier -> skill-gap recommender demo.
 
-If your CSV column names differ, edit the CONFIG block only.
+Improvements in data cleaning:
+  * noise stoplist: benefits (dental, PTO), physical reqs (standing, lifting),
+    generic credentials and generic soft skills are dropped by default
+  * expanded synonym dictionary (canonicalizing communication, problem solving, etc.)
+  * --min-skill-freq: drops the long tail of one-off raw skill strings
 """
 import argparse
 import json
@@ -34,14 +38,48 @@ TITLE_COL = "job_title"
 LEVEL_COL = "job_level"       # optional
 COUNTRY_COL = "search_country"  # optional
 
-# raw skill string -> canonical skill (extend as you discover duplicates in EDA)
+# raw skill string -> canonical skill
 SYNONYMS = {
     "js": "javascript", "node": "node.js", "nodejs": "node.js", "reactjs": "react",
     "react.js": "react", "ml": "machine learning", "ai": "artificial intelligence",
     "postgres": "postgresql", "powerbi": "power bi", "ms excel": "excel",
     "microsoft excel": "excel", "k8s": "kubernetes", "gcp": "google cloud",
     "amazon web services": "aws", "c sharp": "c#", "golang": "go",
-    "communications": "communication", "teamwork": "team collaboration",
+    "communications": "communication", "communication skills": "communication",
+    "verbal communication": "communication", "written communication": "communication",
+    "oral communication": "communication",
+    "teamwork": "team collaboration", "team work": "team collaboration",
+    "collaboration": "team collaboration",
+    "problemsolving": "problem solving", "problemsolving skills": "problem solving",
+    "problem-solving": "problem solving", "problem solving skills": "problem solving",
+    "decisionmaking": "decision making",
+    "microsoft office suite": "microsoft office", "ms office": "microsoft office",
+    "word": "microsoft word", "ms word": "microsoft word", "ms powerpoint": "powerpoint",
+    "organization": "organizational skills", "organization skills": "organizational skills",
+    "leadership skills": "leadership", "customer service skills": "customer service",
+}
+
+# Dropped by default (see --keep-noise). Discovered in the first real run:
+# job_skills contains benefits, physical requirements and generic credentials.
+NOISE = {
+    # benefits
+    "dental", "vision", "dental insurance", "vision insurance", "health insurance",
+    "life insurance", "medical insurance", "paid time off", "pto", "401k", "401(k)",
+    "retirement plan", "disability insurance", "paid holidays", "tuition reimbursement",
+    "employee discount", "health benefits", "parental leave", "sick leave",
+    # physical requirements
+    "standing", "walking", "lifting", "bending", "sitting", "climbing", "stooping",
+    "kneeling", "reaching", "pushing", "pulling", "physical stamina", "physical strength",
+    "manual dexterity",
+    # generic credentials
+    "high school diploma", "high school diploma or equivalent", "bachelor's degree",
+    "associate degree", "driver's license", "valid driver's license", "background check",
+    # generic soft skills (appear in every industry, carry little signal)
+    "communication", "leadership", "team collaboration", "problem solving", "time management",
+    "attention to detail", "interpersonal skills", "organizational skills", "adaptability",
+    "flexibility", "critical thinking", "multitasking", "decision making", "professionalism",
+    "work ethic", "motivation", "analytical skills", "analytical thinking", "inclusion",
+    "diversity",
 }
 
 # ordered rules: first match wins. Used as weak labels for the classifier.
@@ -75,20 +113,18 @@ def role_category_col(title_col):
     return expr
 
 
-def load_and_clean(spark, postings_path, skills_path, sample, out):
+def load_and_clean(spark, postings_path, skills_path, sample, out, min_skill_freq=20, keep_noise=False):
     skills_raw = spark.read.csv(skills_path, header=True, escape='"')
     postings = spark.read.csv(postings_path, header=True, escape='"', multiLine=False)
 
-    for opt in (LEVEL_COL, COUNTRY_COL):  # optional columns -> null if absent
+    for opt in (LEVEL_COL, COUNTRY_COL):
         if opt not in postings.columns:
             postings = postings.withColumn(opt, F.lit(None).cast("string"))
     postings = postings.select(JOB_KEY, TITLE_COL, LEVEL_COL, COUNTRY_COL).dropDuplicates([JOB_KEY])
     skills_raw = skills_raw.select(JOB_KEY, SKILLS_COL).dropna()
-
     if sample < 1.0:
         skills_raw = skills_raw.sample(fraction=sample, seed=42)
 
-    # explode -> normalize -> re-collect (robust under ANSI mode, no UDF)
     exploded = (
         skills_raw.select(JOB_KEY, F.explode(F.split(F.lower(F.col(SKILLS_COL)), ",")).alias("skill"))
         .withColumn("skill", F.trim(F.regexp_replace("skill", r"\s+", " ")))
@@ -100,6 +136,11 @@ def load_and_clean(spark, postings_path, skills_path, sample, out):
         .withColumn("skill", F.coalesce("canon", "skill"))
         .select(JOB_KEY, "skill")
     )
+    if not keep_noise:
+        exploded = exploded.filter(~F.col("skill").isin(sorted(NOISE)))
+    if min_skill_freq > 1:  # drop the long tail of one-off strings
+        keep = exploded.groupBy("skill").count().filter(F.col("count") >= min_skill_freq).select("skill")
+        exploded = exploded.join(keep, "skill", "inner")
 
     jobs = (
         exploded.groupBy(JOB_KEY).agg(F.array_sort(F.collect_set("skill")).alias("items"))
@@ -107,8 +148,9 @@ def load_and_clean(spark, postings_path, skills_path, sample, out):
         .join(postings, JOB_KEY, "inner")
         .withColumn("role", role_category_col(F.col(TITLE_COL)))
     )
-    jobs.write.mode("overwrite").parquet(os.path.join(out, "jobs_parquet"))
-    return spark.read.parquet(os.path.join(out, "jobs_parquet"))  # re-read = columnar speed
+    path = os.path.join(out, "jobs_parquet")
+    jobs.write.mode("overwrite").parquet(path)
+    return spark.read.parquet(path)
 
 
 def run_eda(jobs, out, metrics):
@@ -124,8 +166,10 @@ def run_eda(jobs, out, metrics):
     dist = jobs.select(F.size("items").alias("n_skills")).groupBy("n_skills").count().orderBy("n_skills")
     dist.toPandas().to_csv(os.path.join(out, "eda_skills_per_job.csv"), index=False)
 
-    jobs.groupBy("role").count().orderBy(F.desc("count")).toPandas().to_csv(
-        os.path.join(out, "eda_role_counts.csv"), index=False)
+    roles = jobs.groupBy("role").count().orderBy(F.desc("count")).toPandas()
+    roles.to_csv(os.path.join(out, "eda_role_counts.csv"), index=False)
+    metrics["role_counts"] = dict(zip(roles["role"], map(int, roles["count"])))
+
     jobs.groupBy(TITLE_COL).count().orderBy(F.desc("count")).limit(30).toPandas().to_csv(
         os.path.join(out, "eda_top_titles.csv"), index=False)
     if COUNTRY_COL in jobs.columns:
@@ -234,15 +278,18 @@ def main():
     ap.add_argument("--min-conf", type=float, default=0.3)
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--vocab", type=int, default=300)
+    ap.add_argument("--min-skill-freq", type=int, default=20, help="drop skills seen in fewer jobs")
+    ap.add_argument("--keep-noise", action="store_true", help="keep benefits/physical/soft-skill tags")
     ap.add_argument("--demo-skills", default="python")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     spark = get_spark()
     spark.sparkContext.setLogLevel("WARN")
-    metrics = {}
+    metrics = {"args": vars(args)}
 
-    jobs = load_and_clean(spark, args.postings, args.skills, args.sample, args.out).cache()
+    jobs = load_and_clean(spark, args.postings, args.skills, args.sample, args.out,
+                          args.min_skill_freq, args.keep_noise).cache()
     run_eda(jobs, args.out, metrics)
     rules_pd = mine_rules(jobs, args.out, metrics, args.min_support, args.min_conf)
     cluster_roles(jobs, args.out, metrics, args.k, args.vocab)
