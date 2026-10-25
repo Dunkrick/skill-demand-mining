@@ -1,26 +1,27 @@
 """
-Job Market Skill-Demand Mining - PySpark pipeline
+Job Market Skill-Demand Mining - PySpark pipeline  (v2)
 Course: Analytics and Systems of Big Data
 
-Run (local):
-    python job_skills_pipeline.py \
-        --postings data/job_postings.csv \
-        --skills   data/job_skills.csv \
-        --out      out/ \
-        --sample   0.1
+v2 changes (after first real run on 10% of the Kaggle data):
+  * noise stoplist: benefits (dental, PTO), physical reqs (standing, lifting),
+    generic credentials and generic soft skills are dropped by default
+  * more synonyms (communication skills -> communication, problemsolving -> problem solving ...)
+  * --min-skill-freq: drops the 400k-long tail of one-off skill strings
+  * --tech-only: restrict to tech roles so Python/SQL/AWS rules can appear
+  * PCA before KMeans (higher silhouette on sparse binary data)
+  * per-stage timing in metrics.json (scalability table)
 
-Stages: load -> clean/normalize skills -> Parquet -> EDA -> FP-Growth rules
-        -> KMeans role clusters -> role classifier -> skill-gap recommender demo.
-
-Machine learning enhancements:
-  * PCA dimensionality reduction before KMeans (higher silhouette on sparse binary data)
-  * Cluster profiling via skill salience scores (share^2 / global_freq) and top job titles
+Examples:
+    python job_skills_pipeline.py --postings data/job_postings.csv --skills data/job_skills.csv \
+        --out out_tech/ --sample 0.5 --tech-only --min-support 0.03 --demo-skills "python,sql"
+    python job_skills_pipeline.py --postings data/job_postings.csv --skills data/job_skills.csv \
+        --out out_all/ --sample 0.1
 """
 import argparse
 import json
 import os
+import time
 
-import pandas as pd
 from pyspark.ml import Pipeline
 from pyspark.ml.classification import LogisticRegression, RandomForestClassifier
 from pyspark.ml.clustering import KMeans
@@ -31,13 +32,13 @@ from pyspark.sql import SparkSession, functions as F
 from pyspark.sql.window import Window
 
 # ----------------------------- CONFIG ---------------------------------------
-JOB_KEY = "job_link"          # join key present in both files
-SKILLS_COL = "job_skills"     # comma-separated skills string
+JOB_KEY = "job_link"
+SKILLS_COL = "job_skills"
 TITLE_COL = "job_title"
-LEVEL_COL = "job_level"       # optional
-COUNTRY_COL = "search_country"  # optional
+LEVEL_COL = "job_level"
+COUNTRY_COL = "search_country"
 
-# raw skill string -> canonical skill
+# raw (lowercased) skill string -> canonical skill
 SYNONYMS = {
     "js": "javascript", "node": "node.js", "nodejs": "node.js", "reactjs": "react",
     "react.js": "react", "ml": "machine learning", "ai": "artificial intelligence",
@@ -81,7 +82,9 @@ NOISE = {
     "diversity",
 }
 
-# ordered rules: first match wins. Used as weak labels for the classifier.
+TECH_ROLES = ["data_ml", "software_eng", "devops_cloud"]
+
+# ordered rules: first match wins. Weak labels for the classifier.
 ROLE_RULES = [
     ("data_ml", r"data scien|machine learning|\bml\b|\bai\b|data analy|analytics|data engineer|business intelligence"),
     ("devops_cloud", r"devops|site reliability|\bsre\b|cloud|infrastructure|platform engineer"),
@@ -112,7 +115,7 @@ def role_category_col(title_col):
     return expr
 
 
-def load_and_clean(spark, postings_path, skills_path, sample, out, min_skill_freq=20, keep_noise=False):
+def load_and_clean(spark, postings_path, skills_path, sample, out, min_skill_freq, keep_noise):
     skills_raw = spark.read.csv(skills_path, header=True, escape='"')
     postings = spark.read.csv(postings_path, header=True, escape='"', multiLine=False)
 
@@ -143,7 +146,7 @@ def load_and_clean(spark, postings_path, skills_path, sample, out, min_skill_fre
 
     jobs = (
         exploded.groupBy(JOB_KEY).agg(F.array_sort(F.collect_set("skill")).alias("items"))
-        .filter(F.size("items") >= 2)  # single-skill jobs carry no co-occurrence info
+        .filter(F.size("items") >= 2)
         .join(postings, JOB_KEY, "inner")
         .withColumn("role", role_category_col(F.col(TITLE_COL)))
     )
@@ -162,44 +165,39 @@ def run_eda(jobs, out, metrics):
     top["pct_of_jobs"] = (top["count"] / n * 100).round(2)
     top.to_csv(os.path.join(out, "eda_top_skills.csv"), index=False)
 
-    dist = jobs.select(F.size("items").alias("n_skills")).groupBy("n_skills").count().orderBy("n_skills")
-    dist.toPandas().to_csv(os.path.join(out, "eda_skills_per_job.csv"), index=False)
+    jobs.select(F.size("items").alias("n_skills")).groupBy("n_skills").count().orderBy("n_skills") \
+        .toPandas().to_csv(os.path.join(out, "eda_skills_per_job.csv"), index=False)
 
     roles = jobs.groupBy("role").count().orderBy(F.desc("count")).toPandas()
     roles.to_csv(os.path.join(out, "eda_role_counts.csv"), index=False)
     metrics["role_counts"] = dict(zip(roles["role"], map(int, roles["count"])))
 
-    jobs.groupBy(TITLE_COL).count().orderBy(F.desc("count")).limit(30).toPandas().to_csv(
-        os.path.join(out, "eda_top_titles.csv"), index=False)
-    if COUNTRY_COL in jobs.columns:
-        jobs.groupBy(COUNTRY_COL).count().orderBy(F.desc("count")).limit(20).toPandas().to_csv(
-            os.path.join(out, "eda_by_country.csv"), index=False)
+    jobs.groupBy(TITLE_COL).count().orderBy(F.desc("count")).limit(30).toPandas() \
+        .to_csv(os.path.join(out, "eda_top_titles.csv"), index=False)
+    jobs.groupBy(COUNTRY_COL).count().orderBy(F.desc("count")).limit(20).toPandas() \
+        .to_csv(os.path.join(out, "eda_by_country.csv"), index=False)
 
 
 def mine_rules(jobs, out, metrics, min_support, min_conf):
-    fp = FPGrowth(itemsCol="items", minSupport=min_support, minConfidence=min_conf)
-    model = fp.fit(jobs)
-    freq = model.freqItemsets
-    rules = model.associationRules
+    model = FPGrowth(itemsCol="items", minSupport=min_support, minConfidence=min_conf).fit(jobs)
+    freq, rules = model.freqItemsets, model.associationRules
     metrics["n_frequent_itemsets"] = freq.count()
     metrics["n_rules"] = rules.count()
     metrics["min_support"], metrics["min_confidence"] = min_support, min_conf
 
-    rules_pd = (
-        rules.orderBy(F.desc("lift"), F.desc("confidence")).limit(5000).toPandas()
-    )
+    rules_pd = rules.orderBy(F.desc("lift"), F.desc("confidence")).limit(5000).toPandas()
     rules_pd["antecedent"] = rules_pd["antecedent"].apply(list)
     rules_pd["consequent"] = rules_pd["consequent"].apply(list)
     save = rules_pd.copy()
     save["antecedent"] = save["antecedent"].apply("|".join)
     save["consequent"] = save["consequent"].apply("|".join)
     save.to_csv(os.path.join(out, "rules_top.csv"), index=False)
-    freq.orderBy(F.desc("freq")).limit(100).withColumn("items", F.concat_ws("|", "items")).toPandas().to_csv(
-        os.path.join(out, "frequent_itemsets_top.csv"), index=False)
+    freq.orderBy(F.desc("freq")).limit(100).withColumn("items", F.concat_ws("|", "items")) \
+        .toPandas().to_csv(os.path.join(out, "frequent_itemsets_top.csv"), index=False)
     return rules_pd
 
 
-def cluster_roles(jobs, out, metrics, k, vocab, pca_k=20):
+def cluster_roles(jobs, out, metrics, k, vocab, pca_k):
     cv_model = CountVectorizer(inputCol="items", outputCol="tf", vocabSize=vocab, minDF=20, binary=True).fit(jobs)
     feats = Normalizer(inputCol="tf", outputCol="norm").transform(cv_model.transform(jobs))
     if pca_k and len(cv_model.vocabulary) > pca_k + 1:
@@ -246,24 +244,23 @@ def classify_roles(jobs, metrics, vocab):
     train, test = data.randomSplit([0.8, 0.2], seed=42)
     cv = CountVectorizer(inputCol="items", outputCol="features", vocabSize=vocab, minDF=20, binary=True)
     idx = StringIndexer(inputCol="role", outputCol="label", handleInvalid="skip")
-
     results = {}
     for name, clf in {
         "logreg": LogisticRegression(maxIter=40, regParam=0.01),
-        "random_forest": RandomForestClassifier(numTrees=60, maxDepth=12, seed=42),
+        "random_forest": RandomForestClassifier(numTrees=80, maxDepth=20, seed=42),
     }.items():
-        model = Pipeline(stages=[cv, idx, clf]).fit(train)
-        pred = model.transform(test)
-        acc = MulticlassClassificationEvaluator(metricName="accuracy").evaluate(pred)
-        f1 = MulticlassClassificationEvaluator(metricName="f1").evaluate(pred)
-        results[name] = {"accuracy": round(acc, 4), "weighted_f1": round(f1, 4)}
+        pred = Pipeline(stages=[cv, idx, clf]).fit(train).transform(test)
+        results[name] = {
+            "accuracy": round(MulticlassClassificationEvaluator(metricName="accuracy").evaluate(pred), 4),
+            "weighted_f1": round(MulticlassClassificationEvaluator(metricName="f1").evaluate(pred), 4),
+        }
     metrics["classifier"] = results
     metrics["classifier_train_rows"] = train.count()
     metrics["classifier_test_rows"] = test.count()
 
 
 def recommend(user_skills, rules_pd, top_n=10):
-    """Skill-gap recommender: fire rules whose antecedent is covered by user's skills."""
+    """Skill-gap recommender: fire rules whose antecedent is covered by the user's skills."""
     have = {s.strip().lower() for s in user_skills}
     scores = {}
     for _, r in rules_pd.iterrows():
@@ -289,20 +286,32 @@ def main():
     ap.add_argument("--pca", type=int, default=20, help="PCA dims before KMeans, 0 = off")
     ap.add_argument("--min-skill-freq", type=int, default=20, help="drop skills seen in fewer jobs")
     ap.add_argument("--keep-noise", action="store_true", help="keep benefits/physical/soft-skill tags")
-    ap.add_argument("--demo-skills", default="python")
+    ap.add_argument("--tech-only", action="store_true", help="keep only data_ml/software_eng/devops_cloud jobs")
+    ap.add_argument("--demo-skills", default="python,sql")
     args = ap.parse_args()
 
     os.makedirs(args.out, exist_ok=True)
     spark = get_spark()
-    spark.sparkContext.setLogLevel("WARN")
-    metrics = {"args": vars(args)}
+    spark.sparkContext.setLogLevel("ERROR")
+    metrics = {"args": vars(args), "timing_sec": {}}
 
-    jobs = load_and_clean(spark, args.postings, args.skills, args.sample, args.out,
-                          args.min_skill_freq, args.keep_noise).cache()
-    run_eda(jobs, args.out, metrics)
-    rules_pd = mine_rules(jobs, args.out, metrics, args.min_support, args.min_conf)
-    cluster_roles(jobs, args.out, metrics, args.k, args.vocab, args.pca)
-    classify_roles(jobs, metrics, args.vocab)
+    def timed(name, fn, *a, **kw):
+        t = time.perf_counter()
+        res = fn(*a, **kw)
+        metrics["timing_sec"][name] = round(time.perf_counter() - t, 1)
+        return res
+
+    t0 = time.perf_counter()
+    jobs = timed("load_clean_parquet", load_and_clean, spark, args.postings, args.skills,
+                 args.sample, args.out, args.min_skill_freq, args.keep_noise)
+    if args.tech_only:
+        jobs = jobs.filter(F.col("role").isin(TECH_ROLES))
+    jobs = jobs.cache()
+    timed("eda", run_eda, jobs, args.out, metrics)
+    rules_pd = timed("fpgrowth", mine_rules, jobs, args.out, metrics, args.min_support, args.min_conf)
+    timed("kmeans", cluster_roles, jobs, args.out, metrics, args.k, args.vocab, args.pca)
+    timed("classifiers", classify_roles, jobs, metrics, args.vocab)
+    metrics["timing_sec"]["total"] = round(time.perf_counter() - t0, 1)
 
     demo = [s for s in args.demo_skills.split(",") if s]
     metrics["demo_recommendation"] = {"input": demo, "output": recommend(demo, rules_pd)}
