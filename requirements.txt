@@ -1,0 +1,6 @@
+pyspark>=3.5
+pandas<3
+pyarrow
+numpy
+streamlit   # optional, for the demo dashboard
+# Needs Java 11/17/21 installed (java -version)
