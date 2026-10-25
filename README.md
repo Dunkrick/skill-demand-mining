@@ -118,20 +118,16 @@ The pipeline is designed with Big Data systems principles to optimize memory usa
 ├── README.md                # Project documentation & execution guide
 ├── requirements.txt         # Core dependencies (PySpark, PyArrow, Pandas)
 ├── job_skills_pipeline.py   # Complete end-to-end PySpark pipeline script
+├── benchmarks/              # Empirical performance, scaling metrics & evaluation
+│   ├── BENCHMARKS.md        # Detailed multi-scale scaling & comparative evaluation
+│   └── scalability_summary.json
+├── scripts/                 # Automation & batch runner scripts
+│   ├── phase1_setup_and_smoke.sh  # Setup, Kaggle fetch & 1% smoke test
+│   └── run_experiments.sh         # Batch suite (Tech-Only, All, Scalability)
 ├── data/                    # Dataset directory (untracked / gitignored)
 │   ├── job_postings.csv
 │   └── job_skills.csv
-└── out/                     # Generated outputs & evaluation artifacts
-    ├── jobs_parquet/        # Cleaned, columnar dataset
-    ├── eda_top_skills.csv
-    ├── eda_skills_per_job.csv
-    ├── eda_role_counts.csv
-    ├── eda_top_titles.csv
-    ├── eda_by_country.csv
-    ├── rules_top.csv
-    ├── frequent_itemsets_top.csv
-    ├── cluster_profiles.json
-    └── metrics.json
+└── out*/                    # Experiment output directories (gitignored)
 ```
 
 ---
@@ -167,8 +163,8 @@ cd ASBD-Project
 
 ```bash
 # Create and activate a virtual environment
-python3 -m venv venv
-source venv/bin/activate
+python3 -m venv .venv
+source .venv/bin/activate
 
 # Install dependencies
 pip install -r requirements.txt
@@ -178,58 +174,73 @@ pip install -r requirements.txt
 
 ## 💻 8. Running the Pipeline
 
-The pipeline provides configurable CLI flags for memory control, dataset sampling, and hyperparameter tuning.
+The pipeline provides configurable CLI flags for memory control, dataset sampling, domain filtering, and hyperparameter tuning.
 
-### 1. Smoke Test (Fast Verification on 1% Sample)
+### 1. Fast Smoke Test (1% Sample)
 
 ```bash
-python job_skills_pipeline.py \
-    --postings data/job_postings.csv \
-    --skills data/job_skills.csv \
-    --out out/ \
-    --sample 0.01
+bash scripts/phase1_setup_and_smoke.sh
 ```
 
-### 2. Mid-Semester Benchmark Run (10% Sample with Demo Query)
+### 2. Tech-Only Focus Run (Clean Career Trajectory Rules)
 
 ```bash
 python job_skills_pipeline.py \
     --postings data/job_postings.csv \
     --skills data/job_skills.csv \
-    --out out/ \
-    --sample 0.1 \
-    --min-support 0.01 \
-    --min-conf 0.3 \
-    --k 8 \
+    --out out_tech/ \
+    --sample 0.5 \
+    --tech-only \
+    --min-support 0.02 \
     --demo-skills "python,sql"
 ```
 
-### 3. Full Dataset Execution (Production / Cluster Run)
+### 3. Full Dataset Execution (1.28M Jobs on Standalone Spark)
 
 ```bash
-export SPARK_DRIVER_MEMORY=8g
 python job_skills_pipeline.py \
     --postings data/job_postings.csv \
     --skills data/job_skills.csv \
-    --out out/ \
+    --out out_scale_1.0/ \
     --sample 1.0 \
-    --min-support 0.005 \
-    --min-conf 0.25
+    --min-support 0.01 \
+    --demo-skills "python,sql"
 ```
 
 ### CLI Parameters Reference
 
-| Argument        | Default    | Description                                             |
-| :-------------- | :--------- | :------------------------------------------------------ |
-| `--postings`    | _Required_ | Path to `job_postings.csv`                              |
-| `--skills`      | _Required_ | Path to `job_skills.csv`                                |
-| `--out`         | `out`      | Directory for writing Parquet, CSVs, and JSON metrics   |
-| `--sample`      | `0.1`      | Fraction of dataset to process (`1.0` for full dataset) |
-| `--min-support` | `0.01`     | Minimum support threshold for FP-Growth itemsets        |
-| `--min-conf`    | `0.3`      | Minimum confidence threshold for association rules      |
-| `--k`           | `8`        | Number of clusters for K-Means                          |
-| `--vocab`       | `300`      | Vocabulary size for CountVectorizer feature extraction  |
-| `--demo-skills` | `"python"` | Comma-separated skills to test the recommender engine   |
+| Argument           | Default        | Description                                                                 |
+| :----------------- | :------------- | :-------------------------------------------------------------------------- |
+| `--postings`       | _Required_     | Path to `job_postings.csv`                                                  |
+| `--skills`         | _Required_     | Path to `job_skills.csv`                                                    |
+| `--out`            | `out`          | Directory for writing Parquet, CSVs, and JSON metrics                       |
+| `--sample`         | `0.1`          | Fraction of dataset to process (`1.0` for full dataset)                     |
+| `--min-support`    | `0.01`         | Minimum support threshold for FP-Growth itemsets                            |
+| `--min-conf`       | `0.3`          | Minimum confidence threshold for association rules                          |
+| `--k`              | `8`            | Number of clusters for K-Means                                              |
+| `--vocab`          | `300`          | Vocabulary size for CountVectorizer feature extraction                      |
+| `--pca`            | `20`           | PCA dimensionality reduction components before KMeans (`0` = disabled)      |
+| `--min-skill-freq` | `20`           | Drop rare long-tail skills appearing in fewer than $N$ job postings         |
+| `--keep-noise`     | `False`        | Keep benefits (PTO, 401k), physical reqs, and generic soft skills           |
+| `--tech-only`      | `False`        | Restrict dataset to `software_eng`, `data_ml`, and `devops_cloud`           |
+| `--demo-skills`    | `"python,sql"` | Comma-separated skills to evaluate via the recommender engine               |
+
+---
+
+## ⚡ 9. Systems Scalability & Benchmark Results
+
+Evaluated across **1.28M+ real-world LinkedIn postings** on local Spark (4GB heap):
+
+| Pipeline Stage | 1% Sample (12k jobs) | 50% Sample (642k jobs) | 100% Full (1.28M jobs) | Scalability Character |
+| :--- | :---: | :---: | :---: | :--- |
+| **Ingestion, Clean & Parquet** | 9.1s | 22.3s | 36.9s | Sub-linear ($4\times$ time for $100\times$ data) |
+| **EDA & Summary Stats** | 0.9s | 3.2s | 4.0s | Near-instant columnar projection |
+| **FP-Growth Association Mining** | 1.2s | 17.4s | 31.7s | Memory-efficient FP-Tree |
+| **K-Means Clustering + PCA** | 4.2s | 11.9s | 20.9s | Fixed 20-dim PCA space |
+| **Multi-Class Classification** | 5.0s | 37.1s | 63.7s | Scales linearly with row count |
+| **Total Pipeline Wall-Clock** | **20.4s** | **91.9s** | **157.2s (2m 37s)** | **$100\times$ data in only $7.7\times$ time** |
+
+For complete comparative metrics (noise reduction impact, silhouette score jumps from 0.08 to 0.42, and classifier F1 scores), see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md).
 
 ---
 

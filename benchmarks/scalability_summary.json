@@ -1,0 +1,69 @@
+{
+  "description": "PySpark execution scalability benchmark across dataset sample scales on 1.3M LinkedIn Job Postings",
+  "hardware": "macOS Apple Silicon / Local Standalone Spark Driver (4GB Heap, 16 Shuffle Partitions)",
+  "runs": [
+    {
+      "scale": 0.01,
+      "sample_fraction": 0.01,
+      "n_jobs": 12092,
+      "n_distinct_skills": 1370,
+      "timing_sec": {
+        "load_clean_parquet": 9.1,
+        "eda": 0.9,
+        "fpgrowth": 1.2,
+        "kmeans": 4.2,
+        "classifiers": 5.0,
+        "total": 20.4
+      },
+      "ml_metrics": {
+        "kmeans_silhouette": 0.3883,
+        "logreg_accuracy": 0.8325,
+        "logreg_weighted_f1": 0.8143,
+        "rf_accuracy": 0.7751,
+        "rf_weighted_f1": 0.7289
+      }
+    },
+    {
+      "scale": 0.5,
+      "sample_fraction": 0.5,
+      "n_jobs": 641956,
+      "n_distinct_skills": 46892,
+      "timing_sec": {
+        "load_clean_parquet": 22.3,
+        "eda": 3.2,
+        "fpgrowth": 17.4,
+        "kmeans": 11.9,
+        "classifiers": 37.1,
+        "total": 91.9
+      },
+      "ml_metrics": {
+        "kmeans_silhouette": 0.4173,
+        "logreg_accuracy": 0.8402,
+        "logreg_weighted_f1": 0.8266,
+        "rf_accuracy": 0.7841,
+        "rf_weighted_f1": 0.7478
+      }
+    },
+    {
+      "scale": 1.0,
+      "sample_fraction": 1.0,
+      "n_jobs": 1283940,
+      "n_distinct_skills": 82818,
+      "timing_sec": {
+        "load_clean_parquet": 36.9,
+        "eda": 4.0,
+        "fpgrowth": 31.7,
+        "kmeans": 20.9,
+        "classifiers": 63.7,
+        "total": 157.2
+      },
+      "ml_metrics": {
+        "kmeans_silhouette": 0.4217,
+        "logreg_accuracy": 0.8357,
+        "logreg_weighted_f1": 0.8215,
+        "rf_accuracy": 0.7789,
+        "rf_weighted_f1": 0.7431
+      }
+    }
+  ]
+}
