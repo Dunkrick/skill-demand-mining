@@ -143,7 +143,17 @@ The pipeline is designed with Big Data systems principles to optimize memory usa
 - **Python:** 3.9+ (3.10 / 3.11 recommended)
 - **Java:** Java 11, 17, or 21 (required by Apache Spark)
   ```bash
+  # Check if installed
   java -version
+
+  # macOS (via Homebrew)
+  brew install openjdk@17
+  echo 'export JAVA_HOME="/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"' >> ~/.zshrc
+  echo 'export PATH="/opt/homebrew/opt/openjdk@17/bin:$PATH"' >> ~/.zshrc
+  source ~/.zshrc
+
+  # Ubuntu / Debian / WSL
+  sudo apt update && sudo apt install -y openjdk-17-jre-headless
   ```
 
 ### Step 1: Clone the Repository
