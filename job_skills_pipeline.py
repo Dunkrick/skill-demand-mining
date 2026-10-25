@@ -12,11 +12,9 @@ Run (local):
 Stages: load -> clean/normalize skills -> Parquet -> EDA -> FP-Growth rules
         -> KMeans role clusters -> role classifier -> skill-gap recommender demo.
 
-Improvements in data cleaning:
-  * noise stoplist: benefits (dental, PTO), physical reqs (standing, lifting),
-    generic credentials and generic soft skills are dropped by default
-  * expanded synonym dictionary (canonicalizing communication, problem solving, etc.)
-  * --min-skill-freq: drops the long tail of one-off raw skill strings
+Machine learning enhancements:
+  * PCA dimensionality reduction before KMeans (higher silhouette on sparse binary data)
+  * Cluster profiling via skill salience scores (share^2 / global_freq) and top job titles
 """
 import argparse
 import json
@@ -27,9 +25,10 @@ from pyspark.ml import Pipeline
 from pyspark.ml.classification import LogisticRegression, RandomForestClassifier
 from pyspark.ml.clustering import KMeans
 from pyspark.ml.evaluation import ClusteringEvaluator, MulticlassClassificationEvaluator
-from pyspark.ml.feature import CountVectorizer, Normalizer, StringIndexer
+from pyspark.ml.feature import PCA, CountVectorizer, Normalizer, StringIndexer
 from pyspark.ml.fpm import FPGrowth
 from pyspark.sql import SparkSession, functions as F
+from pyspark.sql.window import Window
 
 # ----------------------------- CONFIG ---------------------------------------
 JOB_KEY = "job_link"          # join key present in both files
@@ -200,37 +199,46 @@ def mine_rules(jobs, out, metrics, min_support, min_conf):
     return rules_pd
 
 
-def cluster_roles(jobs, out, metrics, k, vocab):
-    cv = CountVectorizer(inputCol="items", outputCol="tf", vocabSize=vocab, minDF=20, binary=True)
-    cv_model = cv.fit(jobs)
-    feats = cv_model.transform(jobs)
-    feats = Normalizer(inputCol="tf", outputCol="features").transform(feats)
+def cluster_roles(jobs, out, metrics, k, vocab, pca_k=20):
+    cv_model = CountVectorizer(inputCol="items", outputCol="tf", vocabSize=vocab, minDF=20, binary=True).fit(jobs)
+    feats = Normalizer(inputCol="tf", outputCol="norm").transform(cv_model.transform(jobs))
+    if pca_k and len(cv_model.vocabulary) > pca_k + 1:
+        feats = PCA(k=pca_k, inputCol="norm", outputCol="features").fit(feats).transform(feats)
+        metrics["kmeans_pca_dims"] = pca_k
+    else:
+        feats = feats.withColumnRenamed("norm", "features")
 
-    km = KMeans(k=k, seed=42, featuresCol="features", predictionCol="cluster", maxIter=30)
-    km_model = km.fit(feats)
-    pred = km_model.transform(feats)
+    pred = KMeans(k=k, seed=42, featuresCol="features", predictionCol="cluster", maxIter=30) \
+        .fit(feats).transform(feats).cache()
     metrics["kmeans_k"] = k
-    metrics["kmeans_silhouette"] = round(ClusteringEvaluator(
-        featuresCol="features", predictionCol="cluster").evaluate(pred), 4)
+    metrics["kmeans_silhouette"] = round(
+        ClusteringEvaluator(featuresCol="features", predictionCol="cluster").evaluate(pred), 4)
 
-    vocab_list = cv_model.vocabulary
-    profiles = {}
-    for cid, center in enumerate(km_model.clusterCenters()):
-        top_idx = center.argsort()[::-1][:10]
-        profiles[str(cid)] = {"top_skills": [vocab_list[i] for i in top_idx]}
-    titles = (
+    n = pred.count()
+    sizes = pred.groupBy("cluster").count().withColumnRenamed("count", "size")
+    gcount = pred.select(F.explode("items").alias("skill")).groupBy("skill").count().withColumnRenamed("count", "g")
+    cs = (
+        pred.select("cluster", F.explode("items").alias("skill")).groupBy("cluster", "skill").count()
+        .join(sizes, "cluster").join(gcount, "skill")
+        .withColumn("share", F.col("count") / F.col("size"))
+        .withColumn("score", F.col("share") * F.col("share") / (F.col("g") / F.lit(n)))
+        .filter((F.col("count") >= 20) & (F.col("share") >= 0.05))
+    )
+    top_sk = cs.withColumn("rk", F.row_number().over(
+        Window.partitionBy("cluster").orderBy(F.desc("score")))).filter("rk <= 10").collect()
+    top_ti = (
         pred.groupBy("cluster", TITLE_COL).count()
-        .withColumn("rk", F.row_number().over(
-            __import__("pyspark.sql.window", fromlist=["Window"]).Window.partitionBy("cluster").orderBy(F.desc("count"))))
+        .withColumn("rk", F.row_number().over(Window.partitionBy("cluster").orderBy(F.desc("count"))))
         .filter("rk <= 5").collect()
     )
-    for r in titles:
-        profiles[str(r["cluster"])].setdefault("top_titles", []).append(r[TITLE_COL])
-    sizes = {str(r["cluster"]): r["count"] for r in pred.groupBy("cluster").count().collect()}
-    for cid, s in sizes.items():
-        profiles[cid]["size"] = s
+    profiles = {str(r["cluster"]): {"size": r["size"], "top_skills": [], "top_titles": []} for r in sizes.collect()}
+    for r in sorted(top_sk, key=lambda r: r["rk"]):
+        profiles[str(r["cluster"])]["top_skills"].append(r["skill"])
+    for r in sorted(top_ti, key=lambda r: r["rk"]):
+        profiles[str(r["cluster"])]["top_titles"].append(r[TITLE_COL])
     with open(os.path.join(out, "cluster_profiles.json"), "w") as f:
         json.dump(profiles, f, indent=2)
+    pred.unpersist()
 
 
 def classify_roles(jobs, metrics, vocab):
@@ -278,6 +286,7 @@ def main():
     ap.add_argument("--min-conf", type=float, default=0.3)
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--vocab", type=int, default=300)
+    ap.add_argument("--pca", type=int, default=20, help="PCA dims before KMeans, 0 = off")
     ap.add_argument("--min-skill-freq", type=int, default=20, help="drop skills seen in fewer jobs")
     ap.add_argument("--keep-noise", action="store_true", help="keep benefits/physical/soft-skill tags")
     ap.add_argument("--demo-skills", default="python")
@@ -292,7 +301,7 @@ def main():
                           args.min_skill_freq, args.keep_noise).cache()
     run_eda(jobs, args.out, metrics)
     rules_pd = mine_rules(jobs, args.out, metrics, args.min_support, args.min_conf)
-    cluster_roles(jobs, args.out, metrics, args.k, args.vocab)
+    cluster_roles(jobs, args.out, metrics, args.k, args.vocab, args.pca)
     classify_roles(jobs, metrics, args.vocab)
 
     demo = [s for s in args.demo_skills.split(",") if s]
