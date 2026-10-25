@@ -2,6 +2,9 @@
 # Phase 1: Environment Setup, Kaggle Download & Schema Check
 set -euo pipefail
 
+# Ensure working directory is project root
+cd "$(dirname "$0")/.."
+
 echo "=== 1. Checking Java Version ==="
 java -version
 

@@ -1,6 +1,24 @@
+# Data & Large Output Artifacts
 data/
 out*/
+
+# Python & Virtual Environments
 .venv/
+venv/
+ENV/
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# IDE & Editor Configurations
+.vscode/
+.idea/
+pyrightconfig.json
+
+# OS Artifacts
 .DS_Store
+**/.DS_Store
+Thumbs.db
