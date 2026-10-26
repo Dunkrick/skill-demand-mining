@@ -2,7 +2,7 @@
 # Run benchmark experimental suites:
 #  1. Tech-only domain pipeline (demonstrating clean high-lift rules)
 #  2. All-industries pipeline (broad view)
-#  3. Scalability suite across sample sizes (1%, 50%, 100%)
+#  3. Scalability suite across sample sizes (1%, 10%, 50%, 100%)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -29,7 +29,7 @@ python3 job_skills_pipeline.py \
     --demo-skills "python,sql"
 
 echo "=== 3. Scalability Suite ==="
-for S in 0.01 0.5 1.0; do
+for S in 0.01 0.1 0.5 1.0; do
     echo "Running scale test at sample=${S}..."
     python3 job_skills_pipeline.py \
         --postings "$POSTINGS" \
