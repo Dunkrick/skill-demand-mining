@@ -1,167 +1,79 @@
 # Job Market Skill-Demand Mining with PySpark
 
-> **Course:** Analytics and Systems of Big Data (ASBD) — Semester 7  
-> **Milestone:** Mid-Semester Evaluation & Prototype  
-> **Repository:** [Dunkrick/ASBD-Project](https://github.com/Dunkrick/ASBD-Project.git)
+> **Course:** Analytics and Systems of Big Data (ASBD) - Sem 7  
+> **Institution:** IIITDM Kancheepuram  
+> **Contributors:** Rithwick, Rahul, Naresh, Sachin  
+> **Repository:** [Dunkrick/skill-demand-mining](https://github.com/Dunkrick/skill-demand-mining.git)
 
 ---
 
-## 📌 1. Project Overview & Motivation
+## Overview
 
-Online job postings contain rich insights into the modern labor market, but skill requirements are typically buried in free-form, unstructured text. Job seekers, students, and curriculum designers struggle to identify:
+Job postings contain high-dimensional insights into labor market demands, but skill requirements are frequently buried within unstructured, semi-structured text. This project implements a distributed Big Data mining and machine learning pipeline built on **Apache Spark (PySpark)** over **1.3M+ LinkedIn job postings**.
 
-- Which technical and soft skills actually co-occur in industry demands.
-- How distinct job roles overlap in required skill profiles.
-- What specific skills bridge the gap from a candidate's current profile to target roles.
+By leveraging Spark SQL, DataFrames, and Spark MLlib, the pipeline:
 
-This project implements a scalable, distributed Big Data mining and machine learning pipeline using **Apache Spark (PySpark)** over **1.3M+ LinkedIn job postings**. By leveraging Spark SQL, DataFrames, and Spark MLlib, the pipeline processes large-scale semi-structured posting data to discover association patterns, cluster roles, classify job categories, and power an intelligent skill-gap recommender.
-
----
-
-## 🎯 2. Objectives (Mid-Semester Scope)
-
-- **[O1] Distributed Ingestion & Normalization Pipeline:** Ingest raw CSV data, normalize and canonicalize skill entities, eliminate single-skill noise, and persist intermediate data to columnar Parquet storage.
-- **[O2] Frequent Skillset & Association Rule Mining:** Apply distributed **FP-Growth** to extract co-occurring skill patterns, ranked by **Support**, **Confidence**, and **Lift**.
-- **[O3] Role Skill Profiling & Clustering:** Vectorize multi-label skill sets and group job titles using **K-Means clustering** evaluated via Silhouette score.
-- **[O4] Multi-Class Role Classification:** Benchmark baseline classifiers (**Logistic Regression vs. Random Forest**) to predict high-level role categories from skill profiles.
-- **[O5] Skill-Gap Recommender Engine:** Implement a prototype recommendation algorithm that identifies next-step skills to learn based on candidate input skills and high-confidence association rules.
+- Ingests and normalizes raw job-posting text using broadcast synonym mappings and stoplists.
+- Extracts co-occurring technical and business skills via distributed **FP-Growth** association rule mining.
+- Profiles occupational archetypes using **PCA dimensionality reduction** and **K-Means clustering**.
+- Evaluates **Logistic Regression**, **Random Forest**, and **Bernoulli Naive Bayes** to predict role categories from skill incidence vectors.
+- Powers a rule-based **skill-gap recommender engine** that recommends next-step skills based on rule confidence and lift.
 
 ---
 
-## 🏗️ 3. System Architecture & Pipeline Flow
+## Objectives
 
-The pipeline is designed with Big Data systems principles to optimize memory usage, avoid expensive shuffles, and support scalable execution.
-
-```
-+-------------------------------------------------------------+
-|                     Raw Datasets (CSV)                      |
-|         job_postings.csv    +    job_skills.csv             |
-+-------------------------------------------------------------+
-                              |
-                              v
-+-------------------------------------------------------------+
-|        Stage 1: Distributed Ingestion & Preprocessing       |
-|  - Spark CSV Reader with escaping                           |
-|  - Explode comma-separated skill strings                    |
-|  - Whitespace trimming & length filtering [2, 40] chars     |
-|  - Broadcast Join with Synonym Table (avoids full shuffle)  |
-|  - GroupBy + collect_set() (deduplication & uniqueness)     |
-|  - Filter jobs with < 2 skills (pruning zero-cooccurrence)  |
-|  - Weak-label role tagging via regex rule engine            |
-+-------------------------------------------------------------+
-                              |
-                              v
-+-------------------------------------------------------------+
-|        Stage 2: Optimized Storage (Apache Parquet)          |
-|  - Snappy compressed, columnar partition storage            |
-|  - Eliminates repeated CSV parsing for downstream analytics |
-+-------------------------------------------------------------+
-                              |
-       +----------------------+----------------------+
-       |                      |                      |
-       v                      v                      v
-+--------------+      +--------------+      +------------------+
-| Stage 3: EDA |      | Stage 4: FPM |      | Stage 5: MLlib   |
-| - Top skills |      | - FP-Growth  |      | - CountVectorize |
-| - Role dist  |      | - Freq Sets  |      | - Normalizer(L2) |
-| - Job counts |      | - Rules by   |      | - K-Means Clust. |
-| - Geographies|      |   Lift/Conf  |      | - LR vs RF Clf   |
-+--------------+      +--------------+      +------------------+
-       |                      |                      |
-       +----------------------+----------------------+
-                              |
-                              v
-+-------------------------------------------------------------+
-|          Stage 6: Skill-Gap Recommender & Artifacts         |
-|  - Antecedent rule matching: {skills} -> recommendation     |
-|  - Structured outputs: CSVs, cluster_profiles.json, metrics |
-+-------------------------------------------------------------+
-```
+- **[O1] Distributed Ingestion & Normalization:** Ingest raw CSV data, normalize skill entities, filter noise tokens, and persist clean data to columnar Apache Parquet storage.
+- **[O2] Frequent Skillset & Association Mining:** Apply distributed FP-Growth to extract co-occurring skill patterns ranked by Support, Confidence, and Lift.
+- **[O3] Role Profiling & Clustering:** Vectorize multi-label skill baskets, apply PCA dimensionality reduction, and group roles using K-Means clustering evaluated via Silhouette score.
+- **[O4] Multi-Class Role Classification:** Benchmark baseline classifiers (Logistic Regression, Random Forest, Naive Bayes) against a majority-class baseline to predict role categories from skills.
+- **[O5] Skill-Gap Recommender Engine:** Recommend high-affinity next skills for candidate skill sets using antecedent rule matching.
+- **[O6] Systems Scalability:** Measure execution runtime and output stability across dataset scales from 1% to 100% in local mode.
 
 ---
 
-## 💡 4. Big Data Systems & Algorithmic Choices
+## System Architecture
 
-| Component                 | Technical Choice               | Systems & Algorithmic Rationale                                                                                                                                                        |
-| :------------------------ | :----------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Storage Format**        | Apache Parquet                 | Columnar, compressed format supporting pushdown predicates and selective column projection; speeds up downstream tasks by orders of magnitude over raw CSV.                            |
-| **Deduplication**         | Spark `collect_set`            | FP-Growth expects unique transaction items per basket. Deduplicates synonyms and repeated postings natively within partition aggregations.                                             |
-| **Synonym Normalization** | Broadcast Join (`F.broadcast`) | Synonym mapping is small. Broadcasting avoids expensive shuffle hash joins across cluster worker nodes.                                                                                |
-| **Pattern Mining**        | FP-Growth (over Apriori)       | FP-Growth constructs a compact FP-Tree in two dataset passes without explicit candidate generation, scaling to millions of transactions where Apriori suffers combinatorial explosion. |
-| **Feature Extraction**    | Binary `CountVectorizer`       | Fixed vocabulary size (`vocabSize=300`, `minDF=20`) to bound feature space dimensionality, filter rare token noise, and create binary transaction incidence vectors.                   |
-| **Vector Normalization**  | L2 `Normalizer`                | Projects vectors onto a unit hypersphere, making standard Euclidean K-Means behave effectively like Cosine Similarity for sparse text data.                                            |
-| **Classification**        | Spark ML Pipeline              | Evaluates linear decision boundaries (Logistic Regression) against tree-based ensembles (Random Forest) across an 80/20 train/test split.                                              |
+The pipeline processes data through six modular stages designed for shuffle minimization and predicate pushdown:
 
----
+1. **Distributed Ingestion & Cleaning:** Reads CSVs with quote-escaping, explodes skill tokens, joins with a broadcast synonym dictionary, filters out non-skill noise (benefits, physical requirements, generic soft skills), applies frequency thresholds, and derives weak role labels.
+2. **Columnar Parquet Storage:** Writes Snappy-compressed columnar partitions to avoid redundant parsing across downstream stages.
+3. **Exploratory Data Analysis (EDA):** Aggregates and exports skill frequencies, role distributions, and geographical counts to CSV.
+4. **Frequent Pattern Mining:** Constructs prefix-trees with FP-Growth to identify itemsets and association rules ranked by lift and confidence.
+5. **Clustering & Classification:** Vectorizes token incidence, reduces dimensionality via PCA to 20 components, clusters roles with K-Means, and trains supervised role classifiers.
+6. **Skill-Gap Recommendation:** Matches candidate skills against antecedent rule combinations and ranks recommendations by $\text{Confidence} \times \text{Lift}$.
 
-## 📊 5. Dataset Information
-
-- **Primary Source:** Kaggle — [1.3M LinkedIn Jobs & Skills (2024)](https://www.kaggle.com/datasets/asaniczka/1-3m-linkedin-jobs-and-skills-2024) (asaniczka)
-  - `job_skills.csv`: Contains `job_link` and comma-delimited `job_skills`.
-  - `job_postings.csv`: Contains metadata including `job_link`, `job_title`, `job_level`, `search_country`, `company_name`, etc.
-  - `job_summary.csv`: Full job description text (_excluded to optimize ingestion throughput and avoid unnecessary overhead_).
-- **Fallback Source:** Kaggle — [LinkedIn Job Postings (2023-2024)](https://www.kaggle.com/datasets/arshkon/linkedin-job-postings) (arshkon).
-
-### Dataset Considerations & Limits
-
-- **Snapshot Nature:** Data reflects a single scrape collection window; longitudinal trend analysis is limited, so spatial (country) and hierarchy (seniority level) comparisons are highlighted.
-- **Weak Labels for Classification:** High-level role categories (`data_ml`, `software_eng`, `devops_cloud`, `healthcare`, etc.) are synthesized using keyword regex rules against job titles rather than manual ground truth labels.
-- **Cross-Domain Scope:** Postings span diverse sectors (tech, sales, logistics, healthcare). For domain-specific investigations, subset filtering is easily applied.
+For detailed architectural flowcharts, stage breakdowns, and distributed systems rationale, see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
-## 📁 6. Repository Structure
+## Dataset
 
-```text
-.
-├── PROJECT_PLAN.md          # Comprehensive roadmap, course alignment & timeline
-├── README.md                # Project documentation & execution guide
-├── requirements.txt         # Core dependencies (PySpark, PyArrow, Pandas)
-├── job_skills_pipeline.py   # Complete end-to-end PySpark pipeline script
-├── benchmarks/              # Empirical performance, scaling metrics & evaluation
-│   ├── BENCHMARKS.md        # Detailed multi-scale scaling & comparative evaluation
-│   └── scalability_summary.json
-├── scripts/                 # Automation & batch runner scripts
-│   ├── phase1_setup_and_smoke.sh  # Setup, Kaggle fetch & 1% smoke test
-│   └── run_experiments.sh         # Batch suite (Tech-Only, All, Scalability)
-├── data/                    # Dataset directory (untracked / gitignored)
-│   ├── job_postings.csv
-│   └── job_skills.csv
-└── out*/                    # Experiment output directories (gitignored)
-```
+- **Primary Source:** Kaggle — [1.3M LinkedIn Jobs & Skills (2024)](https://www.kaggle.com/datasets/asaniczka/1-3m-linkedin-jobs-and-skills-2024) (`asaniczka`)
+  - `job_skills.csv`: `job_link`, `job_skills` (comma-delimited text).
+  - `job_postings.csv`: `job_link`, `job_title`, `job_level`, `search_country`, company, location.
+  - `job_summary.csv`: Full posting descriptions (_excluded to maximize ingestion throughput_).
+- **Scope & Characteristics:**
+  - Reflects a single scrape window snapshot; analyses emphasize role and regional patterns rather than multi-year temporal trends.
+  - Role labels are weak labels generated through regex keyword rules against job titles rather than manual ground truth annotations.
+  - Spans cross-industry sectors (healthcare, sales, software, operations); domain filtering (`--tech-only`) isolates software, data/ML, and DevOps subsets.
 
 ---
 
-## 🚀 7. Installation & Setup
+## Installation & Setup
 
 ### Prerequisites
 
-- **Python:** 3.9+ (3.10 / 3.11 recommended)
-- **Java:** Java 11, 17, or 21 (required by Apache Spark)
-  ```bash
-  # Check if installed
-  java -version
+- **Python:** 3.9+ (tested on Python 3.10 to 3.13)
+- **Java:** OpenJDK 11, 17, or 21 (required by Apache Spark)
 
-  # macOS (via Homebrew)
-  brew install openjdk@17
-  echo 'export JAVA_HOME="/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home"' >> ~/.zshrc
-  echo 'export PATH="/opt/homebrew/opt/openjdk@17/bin:$PATH"' >> ~/.zshrc
-  source ~/.zshrc
-
-  # Ubuntu / Debian / WSL
-  sudo apt update && sudo apt install -y openjdk-17-jre-headless
-  ```
-
-### Step 1: Clone the Repository
+### Setup Steps
 
 ```bash
-git clone https://github.com/Dunkrick/ASBD-Project.git
-cd ASBD-Project
-```
+# Clone the repository
+git clone https://github.com/Dunkrick/skill-demand-mining.git
+cd skill-demand-mining
 
-### Step 2: Environment Setup
-
-```bash
 # Create and activate a virtual environment
 python3 -m venv .venv
 source .venv/bin/activate
@@ -172,9 +84,7 @@ pip install -r requirements.txt
 
 ---
 
-## 💻 8. Running the Pipeline
-
-The pipeline provides configurable CLI flags for memory control, dataset sampling, domain filtering, and hyperparameter tuning.
+## Pipeline Execution
 
 ### 1. Fast Smoke Test (1% Sample)
 
@@ -195,7 +105,7 @@ python job_skills_pipeline.py \
     --demo-skills "python,sql"
 ```
 
-### 3. Full Dataset Execution (1.28M Jobs on Standalone Spark)
+### 3. Full Dataset Execution (1.28M Jobs in Local Mode)
 
 ```bash
 python job_skills_pipeline.py \
@@ -209,69 +119,64 @@ python job_skills_pipeline.py \
 
 ### CLI Parameters Reference
 
-| Argument           | Default        | Description                                                                 |
-| :----------------- | :------------- | :-------------------------------------------------------------------------- |
-| `--postings`       | _Required_     | Path to `job_postings.csv`                                                  |
-| `--skills`         | _Required_     | Path to `job_skills.csv`                                                    |
-| `--out`            | `out`          | Directory for writing Parquet, CSVs, and JSON metrics                       |
-| `--sample`         | `0.1`          | Fraction of dataset to process (`1.0` for full dataset)                     |
-| `--min-support`    | `0.01`         | Minimum support threshold for FP-Growth itemsets                            |
-| `--min-conf`       | `0.3`          | Minimum confidence threshold for association rules                          |
-| `--k`              | `8`            | Number of clusters for K-Means                                              |
-| `--vocab`          | `300`          | Vocabulary size for CountVectorizer feature extraction                      |
-| `--pca`            | `20`           | PCA dimensionality reduction components before KMeans (`0` = disabled)      |
-| `--min-skill-freq` | `20`           | Drop rare long-tail skills appearing in fewer than $N$ job postings         |
-| `--keep-noise`     | `False`        | Keep benefits (PTO, 401k), physical reqs, and generic soft skills           |
-| `--tech-only`      | `False`        | Restrict dataset to `software_eng`, `data_ml`, and `devops_cloud`           |
-| `--demo-skills`    | `"python,sql"` | Comma-separated skills to evaluate via the recommender engine               |
+| Argument           | Default        | Description                                                       |
+| :----------------- | :------------- | :---------------------------------------------------------------- |
+| `--postings`       | _Required_     | Path to `job_postings.csv`                                        |
+| `--skills`         | _Required_     | Path to `job_skills.csv`                                          |
+| `--out`            | `out`          | Directory for writing Parquet, CSVs, and JSON metrics             |
+| `--sample`         | `0.1`          | Fraction of dataset to process (`1.0` for full dataset)           |
+| `--min-support`    | `0.01`         | Minimum support threshold for FP-Growth itemsets                  |
+| `--min-conf`       | `0.3`          | Minimum confidence threshold for association rules                |
+| `--k`              | `8`            | Number of clusters for K-Means                                    |
+| `--vocab`          | `300`          | Vocabulary size for CountVectorizer feature extraction            |
+| `--pca`            | `20`           | PCA dimensionality reduction components before KMeans (`0` = off) |
+| `--min-skill-freq` | `20`           | Drop rare skills appearing in fewer than $N$ job postings         |
+| `--keep-noise`     | `False`        | Keep benefits (PTO, 401k), physical reqs, and generic soft skills |
+| `--tech-only`      | `False`        | Restrict dataset to `software_eng`, `data_ml`, and `devops_cloud` |
+| `--demo-skills`    | `"python,sql"` | Comma-separated skills to evaluate in the recommender engine      |
 
 ---
 
-## ⚡ 9. Systems Scalability & Benchmark Results
+## Scalability & Empirical Benchmark Summary
 
-Evaluated across **1.28M+ real-world LinkedIn postings** on local Spark (4GB heap):
+Evaluated across **1.28M+ real-world LinkedIn postings** in local mode (4GB heap, 16 shuffle partitions):
 
-| Pipeline Stage | 1% Sample (12k jobs) | 50% Sample (642k jobs) | 100% Full (1.28M jobs) | Scalability Character |
-| :--- | :---: | :---: | :---: | :--- |
-| **Ingestion, Clean & Parquet** | 9.1s | 22.3s | 36.9s | Sub-linear ($4\times$ time for $100\times$ data) |
-| **EDA & Summary Stats** | 0.9s | 3.2s | 4.0s | Near-instant columnar projection |
-| **FP-Growth Association Mining** | 1.2s | 17.4s | 31.7s | Memory-efficient FP-Tree |
-| **K-Means Clustering + PCA** | 4.2s | 11.9s | 20.9s | Fixed 20-dim PCA space |
-| **Multi-Class Classification** | 5.0s | 37.1s | 63.7s | Scales linearly with row count |
-| **Total Pipeline Wall-Clock** | **20.4s** | **91.9s** | **157.2s (2m 37s)** | **$100\times$ data in only $7.7\times$ time** |
+| Stage                       | 1% Sample (12k jobs) | 10% Sample (127k jobs) | 50% Sample (642k jobs) | 100% Full (1.28M jobs) | Scaling Behavior                                        |
+| :-------------------------- | :------------------: | :--------------------: | :--------------------: | :--------------------: | :------------------------------------------------------ |
+| **Ingest, Clean & Parquet** |         9.1s         |         14.1s          |         22.3s          |         36.9s          | Sub-linear ($4.0\times$ time for $100\times$ data)      |
+| **EDA & Summary Stats**     |         0.9s         |          1.9s          |          3.2s          |          4.0s          | Near-instant columnar projection                        |
+| **FP-Growth Mining**        |         1.2s         |          4.8s          |         17.4s          |         31.7s          | Memory-efficient FP-Tree construction                   |
+| **K-Means + PCA**           |         4.2s         |          6.6s          |         11.9s          |         20.9s          | Bounded feature dimensionality (`vocab=300, pca=20`)    |
+| **Classification**          |         5.0s         |         12.5s          |         37.1s          |         63.7s          | Sub-linear overall (12.7x time for 106x data)           |
+| **Total Runtime**           |      **20.4s**       |       **39.9s**        |       **91.9s**        |       **157.2s**       | **$100\times$ data in only $7.7\times$ execution time** |
 
-For complete comparative metrics (noise reduction impact, silhouette score jumps from 0.08 to 0.42, and classifier F1 scores), see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md).
+For detailed comparative evaluations, noise reduction impact, silhouette improvements, and classifier metrics, see [`benchmarks/BENCHMARKS.md`](benchmarks/BENCHMARKS.md) and [`benchmarks/scalability_summary.json`](benchmarks/scalability_summary.json).
 
 ---
 
-## 📈 9. Output Artifacts & Demonstration
+## Output Artifacts & Demonstration
 
-Upon completion, all metrics and artifacts are exported to the `--out` folder:
+Execution outputs are exported to the specified `--out` directory:
 
-1. **`rules_top.csv`**: Association rules ranked by Lift and Confidence (e.g., `{docker, kubernetes} -> {aws}`).
-2. **`cluster_profiles.json`**: Distinct role clusters containing cluster size, top 10 characteristic skills, and top frequent job titles.
-3. **`metrics.json`**: Comprehensive execution summary:
-   - Total processed jobs and distinct skill counts.
-   - Frequent itemset count and generated association rule count.
-   - K-Means silhouette evaluation score.
-   - Classifier performance (Accuracy and Weighted F1 for Logistic Regression and Random Forest).
-   - Recommender output response for `--demo-skills`.
+1. **`rules_top.csv`**: Association rules ranked by Lift and Confidence.
+2. **`cluster_profiles.json`**: Role clusters detailing cluster sizes, characteristic skills (salience scored), and top titles.
+3. **`metrics.json`**: Execution summary including stage timings, dataset counts, silhouette evaluation, classifier metrics (accuracy, weighted F1, weighted precision, weighted recall, majority baseline), and demo recommendation output.
 
 ### Recommender Demo Example
 
-Given input skills `["python", "sql"]`, the engine evaluates all active rules where the antecedent is satisfied:
+Given input skills `["python", "sql"]` evaluated on tech-domain rules (`out_tech/`):
 
 ```json
 {
   "input": ["python", "sql"],
   "output": [
     {
-      "skill": "spark",
-      "why": "python + sql -> spark (conf 0.42, lift 3.8)"
+      "skill": "java",
+      "why": "python + sql -> java (conf 0.47, lift 1.9)"
     },
     {
-      "skill": "tableau",
-      "why": "python + sql -> tableau (conf 0.38, lift 2.9)"
+      "skill": "aws",
+      "why": "python + sql -> aws (conf 0.42, lift 1.9)"
     }
   ]
 }
@@ -279,22 +184,45 @@ Given input skills `["python", "sql"]`, the engine evaluates all active rules wh
 
 ---
 
-## 🔮 10. Mid-Sem Progress vs. Final-Semester Scope
+## Repository Structure
 
-```
-[ Mid-Semester (Current) ]                  [ Final-Semester Plan ]
-├── Data Ingestion & Broadcast Cleaning      ├── Interactive Streamlit Dashboard
-├── Parquet Storage Migration                ├── Multi-snapshot Temporal Trend Analysis
-├── EDA & Distribution Reporting             ├── Spark Structured Streaming Simulator
-├── FP-Growth Rule Mining                    ├── Distributed Cluster Scaling Benchmarks
-├── K-Means Skill Clustering                 ├── Hand-Labeled Ground-Truth Validation Set
-└── Rule-Based Skill Gap Prototype           └── Deployed REST API for Recommendations
+```text
+.
+├── PROJECT_PLAN.md          # Project roadmap, syllabus alignment, and presentation outline
+├── README.md                # Main documentation and execution guide
+├── requirements.txt         # Core dependencies (PySpark, PyArrow, Pandas)
+├── job_skills_pipeline.py   # Complete end-to-end PySpark pipeline script
+├── docs/
+│   └── ARCHITECTURE.md      # Detailed system architecture and algorithmic rationale
+├── benchmarks/
+│   ├── BENCHMARKS.md        # Comprehensive multi-scale benchmark report
+│   └── scalability_summary.json # Machine-readable scalability and model metrics
+├── scripts/
+│   ├── phase1_setup_and_smoke.sh  # Automated setup and 1% smoke test
+│   └── run_experiments.sh         # Batch suite (Tech-Only, All-Industries, Scalability)
+├── data/                    # Dataset directory (untracked / gitignored)
+└── out*/                    # Experiment output directories (gitignored)
 ```
 
 ---
 
-## 👥 Contributors & Course Details
+## Project Roadmap
+
+The current repository reflects the complete Mid-Semester prototype. Planned final-semester extensions include:
+
+- Interactive Streamlit dashboard for real-time skill-gap exploration.
+- Multi-snapshot temporal trend analysis to capture skill demand shifts.
+- Spark Structured Streaming simulator for real-time job posting streams.
+- Cluster deployment benchmarks on multi-node infrastructure.
+- Hand-annotated ground-truth validation set for classifier calibration.
+
+See [`PROJECT_PLAN.md`](PROJECT_PLAN.md) for detailed course milestones and evaluation notes.
+
+---
+
+## Contributors & Course Details
 
 - **Course:** Analytics and Systems of Big Data (ASBD)
+- **Contributors:** Rithwick, Rahul, Naresh, Sachin
 - **Institution:** IIITDM Kancheepuram
-- **Current Milestone:** Mid-Semester Review (October 2026)
+- **Milestone:** Mid-Semester Evaluation (October 2026)

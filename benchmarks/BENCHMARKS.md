@@ -6,21 +6,22 @@ This document details the experimental findings, systems scalability metrics, an
 
 ## 1. Systems Scalability: 1% to 100% (1.28M Jobs)
 
-The complete pipeline was evaluated across three dataset fractions on local standalone Spark (4GB heap, 16 shuffle partitions):
+The complete pipeline was evaluated across four dataset fractions in local mode (4GB heap, 16 shuffle partitions):
 - **1% sample:** 12,092 jobs
+- **10% sample:** 127,078 jobs
 - **50% sample:** 641,956 jobs
 - **100% full dataset:** 1,283,940 jobs
 
-### ⏱️ Wall-Clock Execution Timing per Stage (Seconds)
+### Wall-Clock Execution Timing per Stage (Seconds)
 
-| Stage | 1% Sample (12k jobs) | 50% Sample (642k jobs) | 100% Full (1.28M jobs) | Scaling Behavior |
-| :--- | :---: | :---: | :---: | :--- |
-| **Ingest, Clean & Parquet Write** | 9.1s | 22.3s | 36.9s | Sub-linear ($4.0\times$ time for $100\times$ data) |
-| **EDA & Distribution Stats** | 0.9s | 3.2s | 4.0s | Near-instant due to columnar Parquet projection |
-| **FP-Growth Association Mining** | 1.2s | 17.4s | 31.7s | Highly efficient prefix-tree construction |
-| **K-Means Clustering + PCA** | 4.2s | 11.9s | 20.9s | Bounded feature dimensionality (`vocab=300, pca=20`) |
-| **Multi-Class Classification** | 5.0s | 37.1s | 63.7s | Linear with respect to row count |
-| **Total End-to-End Runtime** | **20.4s** | **91.9s** | **157.2s** | **$100\times$ data scale in only $7.7\times$ execution time** |
+| Stage | 1% Sample (12k jobs) | 10% Sample (127k jobs) | 50% Sample (642k jobs) | 100% Full (1.28M jobs) | Scaling Behavior |
+| :--- | :---: | :---: | :---: | :---: | :--- |
+| **Ingest, Clean & Parquet Write** | 9.1s | 14.1s | 22.3s | 36.9s | Sub-linear ($4.0\times$ time for $100\times$ data) |
+| **EDA & Distribution Stats** | 0.9s | 1.9s | 3.2s | 4.0s | Near-instant due to columnar Parquet projection |
+| **FP-Growth Association Mining** | 1.2s | 4.8s | 17.4s | 31.7s | Highly efficient prefix-tree construction |
+| **K-Means Clustering + PCA** | 4.2s | 6.6s | 11.9s | 20.9s | Bounded feature dimensionality (`vocab=300, pca=20`) |
+| **Multi-Class Classification** | 5.0s | 12.5s | 37.1s | 63.7s | Sub-linear overall (12.7x time for 106x data) |
+| **Total End-to-End Runtime** | **20.4s** | **39.9s** | **91.9s** | **157.2s** | **$100\times$ data scale in only $7.7\times$ execution time** |
 
 > **Key Systems Takeaway:** Ingesting 1.28 million semi-structured records, extracting vocabulary, building frequent itemsets, performing PCA, clustering into 8 profiles, and training two classifiers completes in under **2 minutes and 38 seconds**.
 
@@ -30,12 +31,14 @@ The complete pipeline was evaluated across three dataset fractions on local stan
 
 A major milestone between Phase 1 and Phase 2 was identifying that raw LinkedIn postings contain non-skill noise tokens (benefits, physical requirements, generic diplomas, and ubiquitous soft skills).
 
-| Metric | v1 Noisy Baseline (10% sample) | v2 Cleaned Pipeline (100% Full Dataset) | Impact & Rationale |
+| Metric | v1 Noisy Baseline (10% sample) | v2 Cleaned Pipeline (10% sample) | Impact & Rationale |
 | :--- | :---: | :---: | :--- |
-| **Distinct Skill Tokens** | 448,244 | 82,818 | Pruned 400k+ rare typos and non-skill strings via `--min-skill-freq 20` |
+| **Distinct Skill Tokens** | 448,244 | 11,915 | Pruned rare typos and non-skill strings via `--min-skill-freq 20` |
 | **Noise Stoplist** | Inactive (`--keep-noise`) | Active (`NOISE` stoplist) | Removed benefits (dental, PTO, 401k) and physical tags (lifting, standing) |
-| **Clustering Silhouette** | **0.0791** | **0.4217** | **$+433\%$ improvement** via PCA projection ($k=20$) prior to K-Means |
+| **Clustering Silhouette** | **0.0791** | **0.396** | Improved cluster separation via PCA to 20 dimensions prior to K-Means |
 | **Top Cluster Profiles** | Dominated by "communication", "401k" | Distinctive role skills (e.g. AWS, Kubernetes, React, Python) | Meaningful skill salience scoring ($share^2 / global\_frequency$) |
+
+> **Note:** Cleaning (noise stoplist, synonym normalization, and frequency filtering) and PCA dimensionality reduction were changed together between these runs, so the gain is not from one cause.
 
 ---
 

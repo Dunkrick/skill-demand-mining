@@ -13,7 +13,7 @@ v2 changes (after first real run on 10% of the Kaggle data):
 
 Examples:
     python job_skills_pipeline.py --postings data/job_postings.csv --skills data/job_skills.csv \
-        --out out_tech/ --sample 0.5 --tech-only --min-support 0.03 --demo-skills "python,sql"
+        --out out_tech/ --sample 0.5 --tech-only --min-support 0.02 --demo-skills "python,sql"
     python job_skills_pipeline.py --postings data/job_postings.csv --skills data/job_skills.csv \
         --out out_all/ --sample 0.1
 """
@@ -23,7 +23,7 @@ import os
 import time
 
 from pyspark.ml import Pipeline
-from pyspark.ml.classification import LogisticRegression, RandomForestClassifier
+from pyspark.ml.classification import LogisticRegression, NaiveBayes, RandomForestClassifier
 from pyspark.ml.clustering import KMeans
 from pyspark.ml.evaluation import ClusteringEvaluator, MulticlassClassificationEvaluator
 from pyspark.ml.feature import PCA, CountVectorizer, Normalizer, StringIndexer
@@ -242,21 +242,45 @@ def cluster_roles(jobs, out, metrics, k, vocab, pca_k):
 def classify_roles(jobs, metrics, vocab):
     data = jobs.filter(F.col("role") != "other")
     train, test = data.randomSplit([0.8, 0.2], seed=42)
+    train = train.cache()
+    test = test.cache()
+    n_train = train.count()
+    n_test = test.count()
+    metrics["classifier_train_rows"] = n_train
+    metrics["classifier_test_rows"] = n_test
+
+    if n_test > 0:
+        top_role_count = test.groupBy("role").count().orderBy(F.col("count").desc()).first()["count"]
+        majority_baseline = round(top_role_count / n_test, 4)
+    else:
+        majority_baseline = 0.0
+
     cv = CountVectorizer(inputCol="items", outputCol="features", vocabSize=vocab, minDF=20, binary=True)
     idx = StringIndexer(inputCol="role", outputCol="label", handleInvalid="skip")
-    results = {}
-    for name, clf in {
+
+    eval_acc = MulticlassClassificationEvaluator(metricName="accuracy")
+    eval_f1 = MulticlassClassificationEvaluator(metricName="f1")
+    eval_prec = MulticlassClassificationEvaluator(metricName="weightedPrecision")
+    eval_rec = MulticlassClassificationEvaluator(metricName="weightedRecall")
+
+    classifiers = {
         "logreg": LogisticRegression(maxIter=40, regParam=0.01),
         "random_forest": RandomForestClassifier(numTrees=80, maxDepth=20, seed=42),
-    }.items():
+        "naive_bayes": NaiveBayes(modelType="bernoulli", smoothing=1.0),
+    }
+
+    results = {"majority_baseline": majority_baseline}
+    for name, clf in classifiers.items():
         pred = Pipeline(stages=[cv, idx, clf]).fit(train).transform(test)
         results[name] = {
-            "accuracy": round(MulticlassClassificationEvaluator(metricName="accuracy").evaluate(pred), 4),
-            "weighted_f1": round(MulticlassClassificationEvaluator(metricName="f1").evaluate(pred), 4),
+            "accuracy": round(eval_acc.evaluate(pred), 4),
+            "weighted_f1": round(eval_f1.evaluate(pred), 4),
+            "weighted_precision": round(eval_prec.evaluate(pred), 4),
+            "weighted_recall": round(eval_rec.evaluate(pred), 4),
         }
     metrics["classifier"] = results
-    metrics["classifier_train_rows"] = train.count()
-    metrics["classifier_test_rows"] = test.count()
+    train.unpersist()
+    test.unpersist()
 
 
 def recommend(user_skills, rules_pd, top_n=10):
